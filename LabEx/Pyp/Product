@@ -1,0 +1,142 @@
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+import jwt
+from functools import wraps
+
+app = Flask(__name__)
+
+# Database configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:your_password@localhost/inventory_db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'your-secret-key'  # Change this to a secure secret key
+
+db = SQLAlchemy(app)
+
+# Models
+class Product(db.Model):
+    __tablename__ = 'products'
+    product_id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    category = db.Column(db.String(50))
+    price = db.Column(db.Float)
+    stock_quantity = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# Authentication decorator
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({'message': 'Token is missing'}), 401
+        try:
+            jwt.decode(token.split()[1], app.config['SECRET_KEY'], algorithms=["HS256"])
+        except:
+            return jsonify({'message': 'Invalid token'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+# API Routes
+
+# Authentication endpoint
+@app.route('/api/login', methods=['POST'])
+def login():
+    auth = request.authorization
+    if auth and auth.username == "admin" and auth.password == "password":  # Replace with proper authentication
+        token = jwt.encode({
+            'user': auth.username,
+            'exp': datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'])
+        return jsonify({'token': token})
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+# Product endpoints
+@app.route('/api/products', methods=['GET'])
+@token_required
+def get_products():
+    products = Product.query.all()
+    return jsonify([{
+        'product_id': p.product_id,
+        'name': p.name,
+        'category': p.category,
+        'price': p.price,
+        'stock_quantity': p.stock_quantity
+    } for p in products])
+
+@app.route('/api/products/<int:product_id>', methods=['GET'])
+@token_required
+def get_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    return jsonify({
+        'product_id': product.product_id,
+        'name': product.name,
+        'category': product.category,
+        'price': product.price,
+        'stock_quantity': product.stock_quantity
+    })
+
+@app.route('/api/products', methods=['POST'])
+@token_required
+def create_product():
+    data = request.get_json()
+    
+    if not data or not data.get('name'):
+        return jsonify({'message': 'Invalid data'}), 400
+        
+    new_product = Product(
+        name=data['name'],
+        category=data.get('category'),
+        price=data.get('price', 0.0),
+        stock_quantity=data.get('stock_quantity', 0)
+    )
+    
+    db.session.add(new_product)
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Product created successfully',
+        'product_id': new_product.product_id
+    }), 201
+
+@app.route('/api/products/<int:product_id>', methods=['PUT'])
+@token_required
+def update_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    data = request.get_json()
+    
+    if 'name' in data:
+        product.name = data['name']
+    if 'category' in data:
+        product.category = data['category']
+    if 'price' in data:
+        product.price = data['price']
+    if 'stock_quantity' in data:
+        product.stock_quantity = data['stock_quantity']
+    
+    db.session.commit()
+    return jsonify({'message': 'Product updated successfully'})
+
+@app.route('/api/products/<int:product_id>', methods=['DELETE'])
+@token_required
+def delete_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    db.session.delete(product)
+    db.session.commit()
+    return jsonify({'message': 'Product deleted successfully'})
+
+# Low stock alert endpoint
+@app.route('/api/alerts/low-stock', methods=['GET'])
+@token_required
+def get_low_stock_alerts():
+    threshold = request.args.get('threshold', 10, type=int)
+    low_stock_products = Product.query.filter(Product.stock_quantity <= threshold).all()
+    return jsonify([{
+        'product_id': p.product_id,
+        'name': p.name,
+        'stock_quantity': p.stock_quantity
+    } for p in low_stock_products])
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
